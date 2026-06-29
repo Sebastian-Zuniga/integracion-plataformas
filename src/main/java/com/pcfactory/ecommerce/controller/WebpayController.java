@@ -18,12 +18,16 @@ public class WebpayController {
 
     // 1. Servicio GET para crear una transacción y llamar a Webpay
     @GetMapping("/crear")
-    public ResponseEntity<?> crearTransaccion(@RequestParam BigDecimal monto, @RequestParam String urlRetorno) {
+    public ResponseEntity<?> crearTransaccion(@RequestParam BigDecimal monto,
+                                              @RequestParam String urlRetorno) {
+
         Map<String, Object> respuesta = webpayService.iniciarPago(monto, urlRetorno);
-        if (respuesta != null) {
-            return ResponseEntity.ok(respuesta);
+
+        if (respuesta.containsKey("error")) {
+            return ResponseEntity.badRequest().body(respuesta);
         }
-        return ResponseEntity.badRequest().body("No se pudo iniciar la transacción con Webpay.");
+
+        return ResponseEntity.ok(respuesta);
     }
 
     // 2. Endpoint POST donde se recibe el status de pago desde Webpay y se cambia el estado
