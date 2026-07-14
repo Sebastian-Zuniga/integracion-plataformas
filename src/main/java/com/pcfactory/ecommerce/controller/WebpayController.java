@@ -1,42 +1,36 @@
 package com.pcfactory.ecommerce.controller;
 
+import com.pcfactory.ecommerce.dto.webpay.WebpayCreateResponse;
 import com.pcfactory.ecommerce.model.Transaccion;
 import com.pcfactory.ecommerce.service.WebpayService;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/api/webpay")
 public class WebpayController {
 
-    @Autowired
-    private WebpayService webpayService;
+    private final WebpayService webpayService;
 
-    // 1. Servicio GET para crear una transacción y llamar a Webpay
-    @GetMapping("/crear")
-    public ResponseEntity<?> crearTransaccion(@RequestParam BigDecimal monto,
-                                              @RequestParam String urlRetorno) {
-
-        Map<String, Object> respuesta = webpayService.iniciarPago(monto, urlRetorno);
-
-        if (respuesta.containsKey("error")) {
-            return ResponseEntity.badRequest().body(respuesta);
-        }
-
-        return ResponseEntity.ok(respuesta);
+    public WebpayController(WebpayService webpayService) {
+        this.webpayService = webpayService;
     }
 
-    // 2. Endpoint POST donde se recibe el status de pago desde Webpay y se cambia el estado
+    @GetMapping("/crear")
+    public ResponseEntity<WebpayCreateResponse> crearTransaccion(
+            @RequestParam BigDecimal monto,
+            @RequestParam String urlRetorno) {
+        return ResponseEntity.ok(webpayService.iniciarPago(monto, urlRetorno));
+    }
+
     @PostMapping("/confirmar")
-    public ResponseEntity<?> confirmarTransaccion(@RequestParam String token, @RequestParam String status) {
-        Transaccion transaccionActualizada = webpayService.finalizarPago(token, status);
-        if (transaccionActualizada != null) {
-            return ResponseEntity.ok(transaccionActualizada);
-        }
-        return ResponseEntity.notFound().build();
+    public ResponseEntity<Transaccion> confirmarTransaccion(
+            @RequestParam(name = "token_ws", required = false) String tokenWs,
+            @RequestParam(name = "token", required = false) String tokenAlternativo) {
+
+        String token = tokenWs != null && !tokenWs.isBlank() ? tokenWs : tokenAlternativo;
+        return ResponseEntity.ok(webpayService.finalizarPago(token));
     }
 }
