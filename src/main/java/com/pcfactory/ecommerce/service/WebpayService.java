@@ -1,71 +1,147 @@
 package com.pcfactory.ecommerce.service;
 
+import com.pcfactory.ecommerce.config.WebpayProperties;
+import com.pcfactory.ecommerce.dto.webpay.WebpayCommitResponse;
+import com.pcfactory.ecommerce.dto.webpay.WebpayCreateRequest;
+import com.pcfactory.ecommerce.dto.webpay.WebpayCreateResponse;
 import com.pcfactory.ecommerce.model.Transaccion;
 import com.pcfactory.ecommerce.repository.TransaccionRepository;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.server.ResponseStatusException;
+
 import java.math.BigDecimal;
+import java.net.URI;
 import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.UUID;
+
+import static org.springframework.http.HttpStatus.BAD_GATEWAY;
+import static org.springframework.http.HttpStatus.BAD_REQUEST;
+import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 @Service
 public class WebpayService {
 
-    @Autowired
-    private TransaccionRepository transaccionRepository;
+    private final TransaccionRepository transaccionRepository;
+    private final WebpayProperties properties;
+    private final WebClient webpayClient;
 
-    public WebpayService() {
+    public WebpayService(TransaccionRepository transaccionRepository,
+                         WebpayProperties properties,
+                         WebClient.Builder webClientBuilder) {
+        this.transaccionRepository = transaccionRepository;
+        this.properties = properties;
+        this.webpayClient = webClientBuilder
+                .baseUrl(properties.getBaseUrl())
+                .defaultHeader("Tbk-Api-Key-Id", properties.getCommerceCode())
+                .defaultHeader("Tbk-Api-Key-Secret", properties.getApiKey())
+                .build();
     }
 
-    public Map<String, Object> iniciarPago(BigDecimal monto, String urlRetorno) {
-        Map<String, Object> resultado = new HashMap<>();
+    public WebpayCreateResponse iniciarPago(BigDecimal monto, String urlRetorno) {
+        validarDatosCreacion(monto, urlRetorno);
+
+        String buyOrder = "ORD-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
+        String sessionId = "SESS-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
+
+        Transaccion transaccion = new Transaccion();
+        transaccion.setBuyOrder(buyOrder);
+        transaccion.setSessionId(sessionId);
+        transaccion.setAmount(monto);
+        transaccion.setEstado("CREADO");
+        transaccion.setFechaCreacion(LocalDateTime.now());
+        transaccion.setFechaActualizacion(LocalDateTime.now());
+        transaccionRepository.save(transaccion);
+
+        WebpayCreateRequest request = new WebpayCreateRequest(buyOrder, sessionId, monto, urlRetorno);
 
         try {
-            // 1. Generar identificadores únicos
-            String buyOrder = "ORD-" + UUID.randomUUID().toString().substring(0, 8);
-            String sessionId = "SESS-" + UUID.randomUUID().toString().substring(0, 8);
-            String tokenSimulado = "01ab" + UUID.randomUUID().toString().replace("-", "");
-            String urlSimulada = "https://webpay3gint.transbank.cl/rswebpaytransaction/api/webpay/v1.2/transactions";
+            WebpayCreateResponse respuesta = webpayClient.post()
+                    .uri("/rswebpaytransaction/api/webpay/v1.2/transactions")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(request)
+                    .retrieve()
+                    .onStatus(status -> status.isError(), response ->
+                            response.bodyToMono(String.class)
+                                    .map(body -> new ResponseStatusException(BAD_GATEWAY,
+                                            "Webpay rechazó la creación de la transacción: " + body)))
+                    .bodyToMono(WebpayCreateResponse.class)
+                    .block();
 
-            // 2. Crear la entidad usando los setters para evitar problemas de constructor
-            Transaccion transaccion = new Transaccion();
-            transaccion.setBuyOrder(buyOrder);
-            transaccion.setSessionId(sessionId);
-            transaccion.setAmount(monto);
-            transaccion.setEstado("CREADO");
-            transaccion.setFechaCreacion(LocalDateTime.now());
-            transaccion.setTokenWebpay(tokenSimulado);
+            if (respuesta == null || respuesta.token() == null || respuesta.url() == null) {
+                throw new ResponseStatusException(BAD_GATEWAY, "Webpay no retornó token y URL válidos");
+            }
 
-            // 3. Guardar en MySQL Workbench
+            transaccion.setTokenWebpay(respuesta.token());
+            transaccion.setFechaActualizacion(LocalDateTime.now());
             transaccionRepository.save(transaccion);
-
-            // 4. Armar respuesta esperada por el controlador
-            resultado.put("token", tokenSimulado);
-            resultado.put("url", urlSimulada);
-            return resultado;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-
-            Map<String, Object> error = new HashMap<>();
-            error.put("error", e.getClass().getName());
-            error.put("mensaje", e.getMessage());
-
-            return error;
+            return respuesta;
+        } catch (ResponseStatusException exception) {
+            transaccion.setEstado("NO PAGADO");
+            transaccion.setFechaActualizacion(LocalDateTime.now());
+            transaccionRepository.save(transaccion);
+            throw exception;
+        } catch (Exception exception) {
+            transaccion.setEstado("NO PAGADO");
+            transaccion.setFechaActualizacion(LocalDateTime.now());
+            transaccionRepository.save(transaccion);
+            throw new ResponseStatusException(BAD_GATEWAY, "No fue posible comunicarse con Webpay", exception);
         }
     }
 
-    public Transaccion finalizarPago(String token, String status) {
-        return transaccionRepository.findByTokenWebpay(token)
-                .map(transaccion -> {
-                    if ("AUTHORIZED".equalsIgnoreCase(status) || "APPROVED".equalsIgnoreCase(status)) {
-                        transaccion.setEstado("PAGADO");
-                    } else {
-                        transaccion.setEstado("NO PAGADO");
-                    }
-                    return transaccionRepository.save(transaccion);
-                }).orElse(null);
+    public Transaccion finalizarPago(String token) {
+        if (token == null || token.isBlank()) {
+            throw new ResponseStatusException(BAD_REQUEST, "El token de Webpay es obligatorio");
+        }
+
+        Transaccion transaccion = transaccionRepository.findByTokenWebpay(token)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "No existe una transacción para el token recibido"));
+
+        try {
+            WebpayCommitResponse respuesta = webpayClient.put()
+                    .uri("/rswebpaytransaction/api/webpay/v1.2/transactions/{token}", token)
+                    .retrieve()
+                    .onStatus(status -> status.isError(), response ->
+                            response.bodyToMono(String.class)
+                                    .map(body -> new ResponseStatusException(BAD_GATEWAY,
+                                            "Webpay rechazó la confirmación: " + body)))
+                    .bodyToMono(WebpayCommitResponse.class)
+                    .block();
+
+            if (respuesta == null) {
+                throw new ResponseStatusException(BAD_GATEWAY, "Webpay no retornó información de confirmación");
+            }
+
+            boolean pagado = Integer.valueOf(0).equals(respuesta.responseCode())
+                    && "AUTHORIZED".equalsIgnoreCase(respuesta.status());
+
+            transaccion.setEstado(pagado ? "PAGADO" : "NO PAGADO");
+            transaccion.setResponseCode(respuesta.responseCode());
+            transaccion.setAuthorizationCode(respuesta.authorizationCode());
+            transaccion.setFechaActualizacion(LocalDateTime.now());
+            return transaccionRepository.save(transaccion);
+        } catch (ResponseStatusException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new ResponseStatusException(BAD_GATEWAY, "No fue posible confirmar el pago con Webpay", exception);
+        }
+    }
+
+    private void validarDatosCreacion(BigDecimal monto, String urlRetorno) {
+        if (monto == null || monto.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new ResponseStatusException(BAD_REQUEST, "El monto debe ser mayor que cero");
+        }
+        if (urlRetorno == null || urlRetorno.isBlank()) {
+            throw new ResponseStatusException(BAD_REQUEST, "La URL de retorno es obligatoria");
+        }
+        try {
+            URI uri = URI.create(urlRetorno);
+            if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))) {
+                throw new IllegalArgumentException();
+            }
+        } catch (IllegalArgumentException exception) {
+            throw new ResponseStatusException(BAD_REQUEST, "La URL de retorno no es válida");
+        }
     }
 }
