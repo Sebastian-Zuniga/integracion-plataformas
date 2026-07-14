@@ -24,7 +24,7 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 public class WebpayService {
 
     private final TransaccionRepository transaccionRepository;
-    private final WebpayClient webpayClient;
+    private final WebClient webpayClient;
 
     public WebpayService(TransaccionRepository transaccionRepository,
                          WebpayProperties properties,
